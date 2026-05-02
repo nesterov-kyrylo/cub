@@ -1,0 +1,118 @@
+import json
+import os
+import ollama
+
+# --- НАСТРОЙКИ ---
+MODEL = "qwen2.5-coder:3b"
+HISTORY_FILE = "history.json"
+TARIFFS_FILE = "tariffs.json"
+
+# Системный промпт — "инструкция" для агента
+SYSTEM_PROMPT = """
+Ты — агент для извлечения показаний счётчиков.
+Из входной строки извлеки три числа и верни ТОЛЬКО валидный JSON в формате:
+{"water": число, "gas": число, "electricity": число}
+Никаких пояснений, только JSON.
+"""
+
+# 🔹 Утилиты работы с JSON
+def load_json(path, default):
+    if not os.path.exists(path):
+        save_json(path, default)
+        return default.copy()
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        # Чиним возможные None/null из файла
+        for k, v in data.items():
+            if v is None:
+                data[k] = 0
+        return data
+    except (json.JSONDecodeError, Exception):
+        print(f"⚠️ {path} повреждён или пуст. Создан заново.")
+        save_json(path, default)
+        return default.copy()
+
+def save_json(path, data):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+
+# 🔹 Ядро агента: вызов LLM + парсинг ответа
+def get_readings_from_llm(user_input: str) -> dict:
+    response = ollama.chat(
+        model=MODEL,
+        messages=[
+            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'user', 'content': user_input}
+        ],
+        options={"temperature": 0.0}
+    )
+    raw = response['message']['content'].strip()
+
+    # Убираем возможные markdown-обёртки (```json ... ```)
+    if raw.startswith('```'):
+        raw = raw.lstrip('`')
+        if raw.lower().startswith('json'):
+            raw = raw[4:]
+        raw = raw.strip()
+    if raw.endswith('```'):
+        raw = raw.rstrip('`').strip()
+
+    return json.loads(raw)
+
+# 🔹 Валидация + Расчёт
+def calculate_and_validate(new_data: dict, old_data: dict, tariffs: dict):
+    report, total_cost = [], 0.0
+    for key, label in [('water', '💧 Вода'), ('gas', '🔥 Газ'), ('electricity', '⚡ Свет')]:
+        old_val = old_data.get(key, 0)  # Безопасный дефолт
+        new_val = new_data.get(key)
+        if new_val is None:
+            continue
+
+        if new_val < old_val:
+            raise ValueError(f"{label} ({new_val}) меньше предыдущего ({old_val}). Проверьте ввод.")
+
+        delta = new_val - old_val
+        cost = delta * tariffs.get(key, 0)
+        total_cost += cost
+        report.append(f"{label}: {new_val} (расход: {delta}) = {cost:.2f} ₽")
+
+    report.append(f"💰 ИТОГО К ОПЛАТЕ: {total_cost:.2f} ₽")
+    return report, new_data
+
+# 🔹 Главный цикл агента
+def main():
+    tariffs = load_json(TARIFFS_FILE, {"water": 53.0, "gas": 12.0, "electricity": 6.0})
+    history = load_json(HISTORY_FILE, {"water": 0, "gas": 0, "electricity": 0})
+
+    print("🤖 Агент коммунальных услуг запущен. Введите 'выход' для завершения.")
+    print(f"📊 Текущие показания в памяти: {history}")
+
+    while True:
+        user_input = input("\n📝 Введите показания: ").strip()
+        if user_input.lower() in ['выход', 'exit', 'q']:
+            break
+        if not user_input:
+            continue
+
+        try:
+            print("⏳ Агент обрабатывает запрос...")
+            new_data = get_readings_from_llm(user_input)
+            report, updated_history = calculate_and_validate(new_data, history, tariffs)
+
+            save_json(HISTORY_FILE, updated_history)
+            history = updated_history  # Обновляем состояние в памяти цикла
+
+            print("\n✅ Расчёт выполнен:")
+            for line in report:
+                print(line)
+
+        except json.JSONDecodeError:
+            print("❌ Агент вернул не JSON. Попробуйте ввести заново.")
+        except ValueError as e:
+            print(f"❌ {e}")
+        except Exception as e:
+            print(f"⚠️ Ошибка: {e}")
+
+if __name__ == "__main__":
+    main()
