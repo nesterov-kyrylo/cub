@@ -1,9 +1,7 @@
-import json
-import os
 import ollama
+from database import get_current_readings, update_current_readings, add_history_record
 
 MODEL = "qwen2.5-coder:3b"
-HISTORY_FILE = "history.json"
 TARIFFS_FILE = "tariffs.json"
 
 SYSTEM_PROMPT = """
@@ -29,39 +27,15 @@ SYSTEM_PROMPT = """
 Ввод: "вода 100, свет 120" → Вывод: {"water": 100, "electricity": 120}
 """
 
+import json
+
 def load_json(path, default):
-    if not os.path.exists(path):
-        save_json(path, default)
-        return default.copy()
+    """Вспомогательная функция для загрузки тарифов"""
     try:
         with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if not data or not isinstance(data, dict):
-            save_json(path, default)
-            return default.copy()
-        return data
-    except Exception:
-        save_json(path, default)
-        return default.copy()
-
-def save_json(path, data):
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2)
-
-def get_user_history(all_data, user_id, default):
-    """Получает историю конкретного пользователя"""
-    if str(user_id) not in all_data:
-        all_data[str(user_id)] = default.copy()
-    user_data = all_data[str(user_id)]
-    for key, default_val in default.items():
-        if key not in user_data or user_data[key] is None:
-            user_data[key] = default_val
-    return user_data
-
-def save_user_history(all_data, user_id, user_data):
-    """Сохраняет историю конкретного пользователя"""
-    all_data[str(user_id)] = user_data
-    return all_data
+            return json.load(f)
+    except:
+        return default
 
 def get_readings_from_llm(user_input: str) -> dict:
     response = ollama.chat(
@@ -94,9 +68,9 @@ def get_readings_from_llm(user_input: str) -> dict:
     return parsed
 
 def process_readings(user_input: str, user_id: int) -> str:
+    """Принимает сырой текст и user_id, возвращает отчёт. Сохраняет в SQLite."""
     tariffs = load_json(TARIFFS_FILE, {"water": 53.0, "gas": 12.0, "electricity": 6.0})
-    all_history = load_json(HISTORY_FILE, {})
-    history = get_user_history(all_history, user_id, {"water": 0, "gas": 0, "electricity": 0})
+    history = get_current_readings(user_id)
 
     new_data = get_readings_from_llm(user_input)
     
@@ -106,9 +80,12 @@ def process_readings(user_input: str, user_id: int) -> str:
         raise ValueError("❌ Не удалось извлечь ни одного показания. Укажи: вода, газ или свет.")
     
     report, total_cost = [], 0.0
-    updated_history = history.copy()
+    updated_readings = history.copy()
+    
+    # Для записи в историю
+    costs = {"water": 0.0, "gas": 0.0, "electricity": 0.0}
 
-    for key, label in [('water', '💧 Вода'), ('gas', ' Газ'), ('electricity', '⚡ Свет')]:
+    for key, label in [('water', '💧 Вода'), ('gas', '🔥 Газ'), ('electricity', '⚡ Свет')]:
         old_val = history.get(key, 0)
         new_val = new_data.get(key)
         if new_val is None:
@@ -118,25 +95,41 @@ def process_readings(user_input: str, user_id: int) -> str:
         
         delta = new_val - old_val
         cost = delta * tariffs.get(key, 0)
+        costs[key] = cost
         total_cost += cost
         report.append(f"{label}: {new_val} (расход: {delta}) = {cost:.2f} ₽")
         
-        updated_history[key] = new_val
+        updated_readings[key] = new_val
 
     report.append(f"💰 ИТОГО К ОПЛАТЕ: {total_cost:.2f} ₽")
     
-    all_history = save_user_history(all_history, user_id, updated_history)
-    save_json(HISTORY_FILE, all_history)
+    # 🔥 Сохраняем в SQLite:
+    # 1. Обновляем текущие показания
+    update_current_readings(
+        user_id, 
+        updated_readings["water"], 
+        updated_readings["gas"], 
+        updated_readings["electricity"]
+    )
+    
+    # 2. Добавляем запись в историю
+    add_history_record(
+        user_id,
+        updated_readings["water"],
+        updated_readings["gas"],
+        updated_readings["electricity"],
+        costs["water"],
+        costs["gas"],
+        costs["electricity"],
+        total_cost
+    )
     
     return "\n".join(report)
 
 def get_user_current_readings(user_id: int) -> dict:
-    all_history = load_json(HISTORY_FILE, {})
-    return get_user_history(all_history, user_id, {"water": 0, "gas": 0, "electricity": 0})
+    """Возвращает текущие показания пользователя"""
+    return get_current_readings(user_id)
 
 def reset_user_history(user_id: int):
-    all_history = load_json(HISTORY_FILE, {})
-    default = {"water": 0, "gas": 0, "electricity": 0}
-    all_history = save_user_history(all_history, user_id, default)
-    save_json(HISTORY_FILE, all_history)
-    return default
+    """Сбрасывает показания пользователя на 0"""
+    reset_user_readings(user_id)
