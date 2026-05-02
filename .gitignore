@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Резервные копии и временные файлы
+*.bak
+*.swp
+*.tmp
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Логи и базы данных
+*.log
+*.sqlite3
+
+# Секреты и конфиги с паролями
+.env
+.secrets
+config_local.json
+
+# IDE
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln

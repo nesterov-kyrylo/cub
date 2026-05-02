@@ -34,3 +34,15 @@ git stash                         # Временно убрать изменен
 - Точка в git add . означает "все файлы в текущей директории"
 - Всегда пиши понятные комментарии в git commit -m "..."
 ========================================
+
+[5] .GITIGNORE (исключение файлов)
+cat > .gitignore << 'EOFIGNORE'
+*.bak
+.DS_Store
+__pycache__/
+venv/
+.env
+EOFIGNORE
+git rm --cached <файл>        # Удалить файл из Git, но оставить на диске
+git add .gitignore
+git commit -m "Add .gitignore"
