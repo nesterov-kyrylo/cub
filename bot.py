@@ -15,7 +15,7 @@ async def cmd_start(message: Message):
     user_id = message.chat.id
     history = get_user_current_readings(user_id)
     await message.answer(
-        "🤖 Привет! Я твой помощник по учёту коммунальных услуг.\n\n"
+        " Привет! Я твой помощник по учёту коммунальных услуг.\n\n"
         "Просто отправь показания в любом формате, например:\n"
         "📝 `Вода 12450, Газ 4521, Свет 88456`\n\n"
         "Доступные команды:\n"
@@ -51,7 +51,7 @@ async def handle_message(message: Message):
         elif "меньше предыдущего" in error_text:
             await message.answer(f"❌ {error_text}")
         else:
-            await message.answer(f"⚠️ Произошла ошибка: {error_text}")
+            await message.answer(f"️ Произошла ошибка: {error_text}")
 
 async def main():
     print("🚀 Бот запущен. Ожидает сообщений...")
