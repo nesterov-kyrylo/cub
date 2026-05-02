@@ -1,8 +1,8 @@
 import ollama
-from database import get_current_readings, update_current_readings, add_history_record
+import json
+from database import get_current_readings, update_current_readings, add_history_record, get_user_tariffs
 
 MODEL = "qwen2.5-coder:3b"
-TARIFFS_FILE = "tariffs.json"
 
 SYSTEM_PROMPT = """
 Ты — агент для извлечения показаний счётчиков из текста.
@@ -26,16 +26,6 @@ SYSTEM_PROMPT = """
 Ввод: "газ 200" → Вывод: {"gas": 200}
 Ввод: "вода 100, свет 120" → Вывод: {"water": 100, "electricity": 120}
 """
-
-import json
-
-def load_json(path, default):
-    """Вспомогательная функция для загрузки тарифов"""
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except:
-        return default
 
 def get_readings_from_llm(user_input: str) -> dict:
     response = ollama.chat(
@@ -69,7 +59,8 @@ def get_readings_from_llm(user_input: str) -> dict:
 
 def process_readings(user_input: str, user_id: int) -> str:
     """Принимает сырой текст и user_id, возвращает отчёт. Сохраняет в SQLite."""
-    tariffs = load_json(TARIFFS_FILE, {"water": 53.0, "gas": 12.0, "electricity": 6.0})
+    # 🔥 Получаем персональные тарифы из БД
+    tariffs = get_user_tariffs(user_id)
     history = get_current_readings(user_id)
 
     new_data = get_readings_from_llm(user_input)
@@ -77,12 +68,10 @@ def process_readings(user_input: str, user_id: int) -> str:
     print(f"🔍 Распарсенные данные: {new_data}")
     
     if not new_data:
-        raise ValueError("❌ Не удалось извлечь ни одного показания. Укажи: вода, газ или свет.")
+        raise ValueError(" Не удалось извлечь ни одного показания. Укажи: вода, газ или свет.")
     
     report, total_cost = [], 0.0
     updated_readings = history.copy()
-    
-    # Для записи в историю
     costs = {"water": 0.0, "gas": 0.0, "electricity": 0.0}
 
     for key, label in [('water', '💧 Вода'), ('gas', '🔥 Газ'), ('electricity', '⚡ Свет')]:
@@ -103,8 +92,6 @@ def process_readings(user_input: str, user_id: int) -> str:
 
     report.append(f"💰 ИТОГО К ОПЛАТЕ: {total_cost:.2f} ₽")
     
-    # 🔥 Сохраняем в SQLite:
-    # 1. Обновляем текущие показания
     update_current_readings(
         user_id, 
         updated_readings["water"], 
@@ -112,7 +99,6 @@ def process_readings(user_input: str, user_id: int) -> str:
         updated_readings["electricity"]
     )
     
-    # 2. Добавляем запись в историю
     add_history_record(
         user_id,
         updated_readings["water"],
@@ -127,9 +113,8 @@ def process_readings(user_input: str, user_id: int) -> str:
     return "\n".join(report)
 
 def get_user_current_readings(user_id: int) -> dict:
-    """Возвращает текущие показания пользователя"""
     return get_current_readings(user_id)
 
 def reset_user_history(user_id: int):
-    """Сбрасывает показания пользователя на 0"""
+    from database import reset_user_readings
     reset_user_readings(user_id)
