@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, date
 
 DB_FILE = "counters.db"
 
@@ -21,7 +21,7 @@ def create_tables(conn):
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,11 +33,12 @@ def create_tables(conn):
             gas_cost REAL,
             electricity_cost REAL,
             total_cost REAL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            reading_date DATE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, reading_date)
         )
     """)
-    
-    # 🔥 НОВАЯ ТАБЛИЦА: персональные тарифы
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_tariffs (
             user_id TEXT PRIMARY KEY,
@@ -74,14 +75,85 @@ def update_current_readings(user_id: int, water: int, gas: int, electricity: int
     conn.commit()
     conn.close()
 
-def add_history_record(user_id: int, water: int, gas: int, electricity: int,
-                       water_cost: float, gas_cost: float, electricity_cost: float, total_cost: float):
+def get_readings_for_date(user_id: int, reading_date: date) -> dict:
+    """Получает показания на конкретную дату"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO history (user_id, water, gas, electricity, water_cost, gas_cost, electricity_cost, total_cost)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (str(user_id), water, gas, electricity, water_cost, gas_cost, electricity_cost, total_cost))
+        SELECT water, gas, electricity FROM history 
+        WHERE user_id = ? AND reading_date = ?
+    """, (str(user_id), reading_date.isoformat()))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {
+            "water": row["water"],
+            "gas": row["gas"],
+            "electricity": row["electricity"]
+        }
+    return None
+
+def get_previous_reading(user_id: int, reading_date: date) -> dict:
+    """Получает предыдущие показания (ближайшие раньше указанной даты)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT water, gas, electricity, reading_date FROM history 
+        WHERE user_id = ? AND reading_date < ?
+        ORDER BY reading_date DESC
+        LIMIT 1
+    """, (str(user_id), reading_date.isoformat()))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {
+            "water": row["water"],
+            "gas": row["gas"],
+            "electricity": row["electricity"],
+            "date": row["reading_date"]
+        }
+    return None
+
+def get_next_reading(user_id: int, reading_date: date) -> dict:
+    """Получает следующие показания (ближайшие позже указанной даты)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT water, gas, electricity, reading_date FROM history 
+        WHERE user_id = ? AND reading_date > ?
+        ORDER BY reading_date ASC
+        LIMIT 1
+    """, (str(user_id), reading_date.isoformat()))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {
+            "water": row["water"],
+            "gas": row["gas"],
+            "electricity": row["electricity"],
+            "date": row["reading_date"]
+        }
+    return None
+
+def add_or_update_history_record(user_id: int, water: int, gas: int, electricity: int,
+                                  water_cost: float, gas_cost: float, electricity_cost: float, 
+                                  total_cost: float, reading_date: date):
+    """Добавляет или обновляет запись на конкретную дату"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO history (user_id, water, gas, electricity, water_cost, gas_cost, electricity_cost, total_cost, reading_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, reading_date) DO UPDATE SET
+            water = excluded.water,
+            gas = excluded.gas,
+            electricity = excluded.electricity,
+            water_cost = excluded.water_cost,
+            gas_cost = excluded.gas_cost,
+            electricity_cost = excluded.electricity_cost,
+            total_cost = excluded.total_cost,
+            created_at = CURRENT_TIMESTAMP
+    """, (str(user_id), water, gas, electricity, water_cost, gas_cost, electricity_cost, total_cost, reading_date.isoformat()))
     conn.commit()
     conn.close()
 
@@ -89,10 +161,10 @@ def get_user_history(user_id: int, limit: int = 10) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT water, gas, electricity, total_cost, created_at 
-        FROM history 
-        WHERE user_id = ? 
-        ORDER BY created_at DESC 
+        SELECT water, gas, electricity, total_cost, reading_date, created_at
+        FROM history
+        WHERE user_id = ?
+        ORDER BY reading_date DESC
         LIMIT ?
     """, (str(user_id), limit))
     rows = cursor.fetchall()
@@ -109,21 +181,19 @@ def reset_user_readings(user_id: int):
     conn.commit()
     conn.close()
 
-# 🔥 ФУНКЦИИ ДЛЯ ТАРИФОВ
+# ФУНКЦИИ ДЛЯ ТАРИФОВ
 def get_user_tariffs(user_id: int) -> dict:
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT water, gas, electricity FROM user_tariffs WHERE user_id = ?", (str(user_id),))
     row = cursor.fetchone()
     conn.close()
-    
     if row:
         return {
             "water": row["water"] or 53.0,
             "gas": row["gas"] or 12.0,
             "electricity": row["electricity"] or 6.0
         }
-    
     set_user_tariffs(user_id, 53.0, 12.0, 6.0)
     return {"water": 53.0, "gas": 12.0, "electricity": 6.0}
 
