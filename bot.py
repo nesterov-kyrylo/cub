@@ -1,15 +1,18 @@
 import asyncio
 import re
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message
-from aiogram.filters import Command
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command, CommandObject
 from agent import process_readings, get_user_current_readings
-from database import reset_user_readings, get_user_history, get_user_tariffs, update_user_tariff, get_readings_for_month
+from database import reset_user_readings, get_user_history, get_user_tariffs, update_user_tariff, get_readings_for_month, delete_all_user_data
 
 BOT_TOKEN = "8667184295:AAHlL96N4FFIULDOXMUet5qXUfx0RYsTTm8"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Хранилище состояний для подтверждения удаления
+reset_confirmation = {}
 
 TARIFF_KEY_MAP = {
     "вода": "water",
@@ -22,7 +25,6 @@ TARIFF_KEY_MAP = {
     "электричество": "electricity"
 }
 
-# 🔥 СЛОВАРЬ МЕСЯЦЕВ (русские названия → номера)
 MONTH_NAMES = {
     "январь": 1, "янв": 1, "1": 1,
     "февраль": 2, "фев": 2, "2": 2,
@@ -73,8 +75,46 @@ async def cmd_start(message: Message):
 @dp.message(Command("reset"))
 async def cmd_reset(message: Message):
     user_id = message.chat.id
-    reset_user_readings(user_id)
-    await message.answer("🔄 Показания сброшены на 0. Теперь можешь ввести новые.")
+    
+    # Создаем кнопки подтверждения
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить всё", callback_data="reset_confirm")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="reset_cancel")]
+    ])
+    
+    await message.answer(
+        "⚠️ **ВНИМАНИЕ!**\n\n"
+        "Вы собираетесь удалить **ВСЕ данные**:\n"
+        "• Всю историю показаний\n"
+        "• Текущие показания\n"
+        "• Настроенные тарифы\n\n"
+        "Это действие **НЕОБРАТИМО**!\n\n"
+        "Продолжить?",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query(lambda c: c.data == "reset_confirm")
+async def confirm_reset(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    
+    # Удаляем все данные
+    deleted_count = delete_all_user_data(user_id)
+    
+    await callback_query.message.edit_text(
+        f"🗑️ **Все данные удалены!**\n\n"
+        f"Удалено записей из истории: {deleted_count}\n"
+        f"Сброшены текущие показания\n"
+        f"Удалены персональные тарифы\n\n"
+        f"Бот готов к работе с нуля."
+    )
+    await callback_query.answer()
+
+@dp.callback_query(lambda c: c.data == "reset_cancel")
+async def cancel_reset(callback_query: types.CallbackQuery):
+    await callback_query.message.edit_text(
+        "❌ **Отменено.**\n\nВсе данные сохранены."
+    )
+    await callback_query.answer()
 
 @dp.message(Command("history"))
 async def cmd_history(message: Message):
@@ -114,10 +154,7 @@ async def cmd_month(message: Message):
     
     month_year = args[1].lower()
     
-    # 🔥 Парсим месяц и год
-    # Формат 1: "05.2026" или "5.2026"
     match_dot = re.match(r'(\d{1,2})\.(\d{2,4})', month_year)
-    # Формат 2: "май 2026" или "мая 2026"
     match_name = re.match(r'(\w+)\s+(\d{2,4})', month_year)
     
     month = None
@@ -131,7 +168,6 @@ async def cmd_month(message: Message):
             year += 2000
     elif match_name:
         month_str, year_str = match_name.groups()
-        # Убираем окончания (мая, июне, июля и т.д.)
         month_clean = month_str.rstrip('аяеийюя')
         if month_clean in MONTH_NAMES:
             month = MONTH_NAMES[month_clean]
@@ -146,7 +182,6 @@ async def cmd_month(message: Message):
         await message.answer("❌ Некорректная дата. Пример: `/month 05.2026` или `/month май 2026`")
         return
     
-    # 🔥 Получаем данные за месяц
     records = get_readings_for_month(user_id, year, month)
     
     if not records:
@@ -158,7 +193,6 @@ async def cmd_month(message: Message):
         await message.answer(f"📭 За {month_names_ru[month]} {year} года нет записей.")
         return
     
-    # 🔥 Формируем отчёт
     month_names_ru = {
         1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
         5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
@@ -192,7 +226,6 @@ async def cmd_month(message: Message):
             f"   💰 {cost:.2f} ₽"
         )
     
-    # Итоги за месяц
     report.append(f"\n📈 **Итого за месяц:**")
     report.append(f"💧 Вода: {total_water}")
     report.append(f"🔥 Газ: {total_gas}")

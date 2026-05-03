@@ -167,13 +167,34 @@ def get_user_history(user_id: int, limit: int = 10) -> list:
     conn.close()
     return [dict(row) for row in rows]
 
-# 🔥 НОВАЯ ФУНКЦИЯ: получение данных за месяц
-def get_readings_for_month(user_id: int, year: int, month: int) -> list:
-    """Получает все показания пользователя за указанный месяц"""
+# 🔥 НОВАЯ ФУНКЦИЯ: полное удаление всех данных пользователя
+def delete_all_user_data(user_id: int) -> int:
+    """Удаляет ВСЕ данные пользователя (историю и текущие показания). Возвращает количество удаленных записей."""
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Определяем первый и последний день месяца
+    # Считаем количество записей в истории
+    cursor.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (str(user_id),))
+    history_count = cursor.fetchone()[0]
+    
+    # Удаляем историю
+    cursor.execute("DELETE FROM history WHERE user_id = ?", (str(user_id),))
+    
+    # Удаляем текущие показания
+    cursor.execute("DELETE FROM current_readings WHERE user_id = ?", (str(user_id),))
+    
+    # Удаляем тарифы
+    cursor.execute("DELETE FROM user_tariffs WHERE user_id = ?", (str(user_id),))
+    
+    conn.commit()
+    conn.close()
+    
+    return history_count
+
+def get_readings_for_month(user_id: int, year: int, month: int) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    
     if month == 12:
         next_year = year + 1
         next_month = 1
@@ -207,7 +228,6 @@ def reset_user_readings(user_id: int):
     conn.commit()
     conn.close()
 
-# ФУНКЦИИ ДЛЯ ТАРИФОВ
 def get_user_tariffs(user_id: int) -> dict:
     conn = get_connection()
     cursor = conn.cursor()
