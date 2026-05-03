@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 from aiogram.filters import Command
 from agent import process_readings, get_user_current_readings
-from database import reset_user_readings, get_user_history, get_user_tariffs, update_user_tariff
+from database import reset_user_readings, get_user_history, get_user_tariffs, update_user_tariff, get_readings_for_month
 
 BOT_TOKEN = "8667184295:AAHlL96N4FFIULDOXMUet5qXUfx0RYsTTm8"
 
@@ -22,6 +22,22 @@ TARIFF_KEY_MAP = {
     "электричество": "electricity"
 }
 
+# 🔥 СЛОВАРЬ МЕСЯЦЕВ (русские названия → номера)
+MONTH_NAMES = {
+    "январь": 1, "янв": 1, "1": 1,
+    "февраль": 2, "фев": 2, "2": 2,
+    "март": 3, "мар": 3, "3": 3,
+    "апрель": 4, "апр": 4, "4": 4,
+    "май": 5, "5": 5,
+    "июнь": 6, "июн": 6, "6": 6,
+    "июль": 7, "июл": 7, "7": 7,
+    "август": 8, "авг": 8, "8": 8,
+    "сентябрь": 9, "сен": 9, "сент": 9, "9": 9,
+    "октябрь": 10, "окт": 10, "10": 10,
+    "ноябрь": 11, "ноя": 11, "ноян": 11, "11": 11,
+    "декабрь": 12, "дек": 12, "12": 12
+}
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.chat.id
@@ -34,6 +50,10 @@ async def cmd_start(message: Message):
         "`Вода 12450, Газ 4521, Свет 88456` — на сегодня\n"
         "`Вода 12500 10.03.2026` — на указанную дату\n"
         "`свет 200 15.04.2026` — частично\n\n"
+        "📊 Просмотр данных:\n"
+        "/history — последние 10 записей\n"
+        "/month 05.2026 — все записи за май 2026\n"
+        "/month май 2026 — тоже самое\n\n"
         "⚙️ Управление тарифами:\n"
         "/my_tariffs — посмотреть текущие тарифы\n"
         "/set_tariff <ключ> <цена> — изменить тариф\n"
@@ -73,6 +93,111 @@ async def cmd_history(message: Message):
         else:
             date_str = str(reading_date)[:16] if reading_date else "N/A"
         report.append(f"{i}. {date_str} — 💰 {record['total_cost']:.2f} ₽")
+    
+    await message.answer("\n".join(report))
+
+@dp.message(Command("month"))
+async def cmd_month(message: Message):
+    user_id = message.chat.id
+    args = message.text.split()
+    
+    if len(args) != 2:
+        await message.answer(
+            "❌ Неверный формат. Используй:\n"
+            "`/month 05.2026` или `/month май 2026`\n\n"
+            "Примеры:\n"
+            "`/month 05.2026`\n"
+            "`/month май 2026`\n"
+            "`/month 12.2025`"
+        )
+        return
+    
+    month_year = args[1].lower()
+    
+    # 🔥 Парсим месяц и год
+    # Формат 1: "05.2026" или "5.2026"
+    match_dot = re.match(r'(\d{1,2})\.(\d{2,4})', month_year)
+    # Формат 2: "май 2026" или "мая 2026"
+    match_name = re.match(r'(\w+)\s+(\d{2,4})', month_year)
+    
+    month = None
+    year = None
+    
+    if match_dot:
+        month_str, year_str = match_dot.groups()
+        month = int(month_str)
+        year = int(year_str)
+        if year < 100:
+            year += 2000
+    elif match_name:
+        month_str, year_str = match_name.groups()
+        # Убираем окончания (мая, июне, июля и т.д.)
+        month_clean = month_str.rstrip('аяеийюя')
+        if month_clean in MONTH_NAMES:
+            month = MONTH_NAMES[month_clean]
+        else:
+            await message.answer(f"❌ Не распознал месяц '{month_str}'. Используй: январь, февраль, ... или номер 1-12")
+            return
+        year = int(year_str)
+        if year < 100:
+            year += 2000
+    
+    if not month or not year or month < 1 or month > 12:
+        await message.answer("❌ Некорректная дата. Пример: `/month 05.2026` или `/month май 2026`")
+        return
+    
+    # 🔥 Получаем данные за месяц
+    records = get_readings_for_month(user_id, year, month)
+    
+    if not records:
+        month_names_ru = {
+            1: "январь", 2: "февраль", 3: "март", 4: "апрель",
+            5: "май", 6: "июнь", 7: "июль", 8: "август",
+            9: "сентябрь", 10: "октябрь", 11: "ноябрь", 12: "декабрь"
+        }
+        await message.answer(f"📭 За {month_names_ru[month]} {year} года нет записей.")
+        return
+    
+    # 🔥 Формируем отчёт
+    month_names_ru = {
+        1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+        5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+        9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
+    }
+    
+    report = [f"📊 **{month_names_ru[month]} {year} года:**\n"]
+    
+    total_water = 0
+    total_gas = 0
+    total_electricity = 0
+    total_cost = 0.0
+    
+    for i, record in enumerate(records, 1):
+        reading_date = record.get("reading_date", "N/A")
+        date_str = str(reading_date)[:10] if reading_date else "N/A"
+        
+        water = record.get("water", 0) or 0
+        gas = record.get("gas", 0) or 0
+        electricity = record.get("electricity", 0) or 0
+        cost = record.get("total_cost", 0) or 0.0
+        
+        total_water += water
+        total_gas += gas
+        total_electricity += electricity
+        total_cost += cost
+        
+        report.append(
+            f"{i}. {date_str}\n"
+            f"   💧 {water} | 🔥 {gas} | ⚡ {electricity}\n"
+            f"   💰 {cost:.2f} ₽"
+        )
+    
+    # Итоги за месяц
+    report.append(f"\n📈 **Итого за месяц:**")
+    report.append(f"💧 Вода: {total_water}")
+    report.append(f"🔥 Газ: {total_gas}")
+    report.append(f"⚡ Свет: {total_electricity}")
+    report.append(f"💰 **Всего: {total_cost:.2f} ₽**")
     
     await message.answer("\n".join(report))
 
@@ -150,7 +275,8 @@ async def handle_message(message: Message):
             "`свет 150 10.03.2026`\n\n"
             "Используй команды:\n"
             "/start — помощь\n"
-            "/my_tariffs — мои тарифы"
+            "/my_tariffs — мои тарифы\n"
+            "/month 05.2026 — показать за месяц"
         )
         return
 
@@ -170,7 +296,6 @@ async def handle_message(message: Message):
             await message.answer(f"⚠️ Ошибка: {error_text}")
 
 async def main():
-    # 🔥 УДАЛЯЕМ WEBHOOK перед запуском polling
     await bot.delete_webhook()
     print("🚀 Бот запущен. База данных: counters.db")
     await dp.start_polling(bot)

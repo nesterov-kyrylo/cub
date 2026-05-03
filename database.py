@@ -76,7 +76,6 @@ def update_current_readings(user_id: int, water: int, gas: int, electricity: int
     conn.close()
 
 def get_readings_for_date(user_id: int, reading_date: date) -> dict:
-    """Получает показания на конкретную дату"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -94,7 +93,6 @@ def get_readings_for_date(user_id: int, reading_date: date) -> dict:
     return None
 
 def get_previous_reading(user_id: int, reading_date: date) -> dict:
-    """Получает предыдущие показания (ближайшие раньше указанной даты)"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -115,7 +113,6 @@ def get_previous_reading(user_id: int, reading_date: date) -> dict:
     return None
 
 def get_next_reading(user_id: int, reading_date: date) -> dict:
-    """Получает следующие показания (ближайшие позже указанной даты)"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -138,7 +135,6 @@ def get_next_reading(user_id: int, reading_date: date) -> dict:
 def add_or_update_history_record(user_id: int, water: int, gas: int, electricity: int,
                                   water_cost: float, gas_cost: float, electricity_cost: float, 
                                   total_cost: float, reading_date: date):
-    """Добавляет или обновляет запись на конкретную дату"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -167,6 +163,36 @@ def get_user_history(user_id: int, limit: int = 10) -> list:
         ORDER BY reading_date DESC
         LIMIT ?
     """, (str(user_id), limit))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+# 🔥 НОВАЯ ФУНКЦИЯ: получение данных за месяц
+def get_readings_for_month(user_id: int, year: int, month: int) -> list:
+    """Получает все показания пользователя за указанный месяц"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Определяем первый и последний день месяца
+    if month == 12:
+        next_year = year + 1
+        next_month = 1
+    else:
+        next_year = year
+        next_month = month + 1
+    
+    first_day = f"{year:04d}-{month:02d}-01"
+    last_day = f"{next_year:04d}-{next_month:02d}-01"
+    
+    cursor.execute("""
+        SELECT water, gas, electricity, water_cost, gas_cost, electricity_cost, total_cost, reading_date
+        FROM history
+        WHERE user_id = ? 
+        AND reading_date >= ? 
+        AND reading_date < ?
+        ORDER BY reading_date ASC
+    """, (str(user_id), first_day, last_day))
+    
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
