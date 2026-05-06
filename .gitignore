@@ -4,34 +4,48 @@ __pycache__/
 *$py.class
 *.so
 .Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
 venv/
-env/
 ENV/
-
-# Резервные копии и временные файлы
-*.bak
-*.swp
-*.tmp
-*~
-
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Логи и базы данных
-*.log
-*.sqlite3
-
-# Секреты и конфиги с паролями
-.env
-.secrets
-config_local.json
+env/
 
 # IDE
-.idea/
 .vscode/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+
+# Database
+*.db
+*.db-journal
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
