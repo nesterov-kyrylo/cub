@@ -12,7 +12,6 @@ def get_connection():
 
 def create_tables(conn):
     cursor = conn.cursor()
-    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS current_readings (
             user_id TEXT PRIMARY KEY,
@@ -63,7 +62,29 @@ def create_tables(conn):
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
+
+    # 🔥 ТАБЛИЦЫ для стационарных платежей
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_profile (
+            user_id TEXT PRIMARY KEY,
+            area REAL DEFAULT 0.0,
+            residents INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fixed_services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            service_name TEXT NOT NULL,
+            amount REAL NOT NULL,
+            unit TEXT DEFAULT 'руб',
+            effective_date DATE NOT NULL,
+            UNIQUE(user_id, service_name, effective_date)
+        )
+    """)
+
     conn.commit()
 
 def migrate_data(conn):
@@ -81,6 +102,8 @@ def migrate_data(conn):
                 """, (row["user_id"], row["water"], row["gas"], row["electricity"]))
             conn.commit()
             print("✅ Миграция завершена.")
+
+# ... (Остальные функции get_current_readings и т.д. без изменений) ...
 
 def get_current_readings(user_id: int) -> dict:
     conn = get_connection()
@@ -170,19 +193,12 @@ def get_next_reading(user_id: int, reading_date: date) -> dict:
     conn.close()
     return {"water": row["water"], "gas": row["gas"], "electricity": row["electricity"], "date": row["reading_date"]} if row else None
 
-# 🔥 ИСПРАВЛЕННАЯ ФУНКЦИЯ: очистка от prev_date до ∞
 def cleanup_calculated_records(user_id: int, start_date: date) -> int:
-    """
-    Удаляет ВСЕ расчётные записи ПОСЛЕ start_date (до бесконечности).
-    Вызывается при добавлении нового факта.
-    """
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
         DELETE FROM history 
-        WHERE user_id = ? 
-        AND reading_date > ? 
-        AND is_calculated = 1
+        WHERE user_id = ? AND reading_date > ? AND is_calculated = 1
     """, (str(user_id), start_date.isoformat()))
     count = cursor.rowcount
     conn.commit()
@@ -235,17 +251,11 @@ def calculate_avg_daily_consumption(user_id: int, counter: str) -> dict:
         WHERE user_id = ? 
         ORDER BY reading_date DESC
     """, (str(user_id),))
-    
     rows = cursor.fetchall()
     conn.close()
     
     if len(rows) < 2:
-        return {
-            "avg_daily": 0,
-            "last_value": rows[0][counter] if rows else 0,
-            "last_date": None,
-            "error": "Недостаточно данных (нужно минимум 2 записи)"
-        }
+        return {"avg_daily": 0, "last_value": rows[0][counter] if rows else 0, "last_date": None, "error": "Недостаточно данных"}
     
     last_row = dict(rows[0])
     last_value = last_row[counter]
@@ -255,35 +265,16 @@ def calculate_avg_daily_consumption(user_id: int, counter: str) -> dict:
         prev_row = dict(rows[i])
         prev_value = prev_row[counter]
         prev_date = date.fromisoformat(prev_row["reading_date"]) if isinstance(prev_row["reading_date"], str) else prev_row["reading_date"]
-        
         days_diff = (last_date - prev_date).days
         if days_diff > 0:
-            value_diff = last_value - prev_value
-            avg_daily = value_diff / days_diff
-            return {
-                "avg_daily": round(avg_daily, 4),
-                "last_value": last_value,
-                "last_date": last_date,
-                "error": None
-            }
+            return {"avg_daily": round((last_value - prev_value) / days_diff, 4), "last_value": last_value, "last_date": last_date, "error": None}
     
-    return {
-        "avg_daily": 0,
-        "last_value": last_value,
-        "last_date": last_date,
-        "error": "Все записи в один день"
-    }
+    return {"avg_daily": 0, "last_value": last_value, "last_date": last_date, "error": "Все записи в один день"}
 
 def interpolate_reading(user_id: int, counter: str, target_date: date) -> dict:
     exact = get_readings_for_date(user_id, target_date)
     if exact:
-        return {
-            "value": exact[counter],
-            "method": "exact",
-            "is_extrapolated": False,
-            "prev_date": None,
-            "next_date": None
-        }
+        return {"value": exact[counter], "method": "exact", "is_extrapolated": False, "prev_date": None, "next_date": None}
     
     prev = get_previous_reading(user_id, target_date)
     next_ = get_next_reading(user_id, target_date)
@@ -293,69 +284,19 @@ def interpolate_reading(user_id: int, counter: str, target_date: date) -> dict:
         next_val = next_[counter]
         prev_d = date.fromisoformat(prev["date"]) if isinstance(prev["date"], str) else prev["date"]
         next_d = date.fromisoformat(next_["date"]) if isinstance(next_["date"], str) else next_["date"]
-        
         total_days = (next_d - prev_d).days
         if total_days > 0:
             days_from_prev = (target_date - prev_d).days
-            ratio = days_from_prev / total_days
-            interpolated = prev_val + (next_val - prev_val) * ratio
-            
-            return {
-                "value": round(interpolated, 2),
-                "method": "linear_interp",
-                "prev_date": prev["date"],
-                "next_date": next_["date"],
-                "is_extrapolated": False
-            }
-    
+            return {"value": round(prev_val + (next_val - prev_val) * (days_from_prev / total_days), 2), "method": "linear_interp", "prev_date": prev["date"], "next_date": next_["date"], "is_extrapolated": False}
+
     avg_data = calculate_avg_daily_consumption(user_id, counter)
-    
     if avg_data["error"]:
-        if prev:
-            return {
-                "value": prev[counter],
-                "method": "fallback_last",
-                "prev_date": prev["date"],
-                "next_date": None,
-                "is_extrapolated": True,
-                "warning": avg_data["error"]
-            }
-        elif next_:
-            return {
-                "value": next_[counter],
-                "method": "fallback_next",
-                "prev_date": None,
-                "next_date": next_["date"],
-                "is_extrapolated": True,
-                "warning": avg_data["error"]
-            }
-        return None
-    
+        return {"value": prev[counter] if prev else 0, "method": "fallback_last", "prev_date": prev["date"] if prev else None, "next_date": None, "is_extrapolated": True, "warning": avg_data["error"]}
+
     if prev and not next_:
         days_diff = (target_date - avg_data["last_date"]).days
         if days_diff >= 0:
-            extrapolated = avg_data["last_value"] + (days_diff * avg_data["avg_daily"])
-            return {
-                "value": round(extrapolated, 2),
-                "method": "extrapolate_forward_avg",
-                "prev_date": avg_data["last_date"].isoformat(),
-                "next_date": None,
-                "is_extrapolated": True,
-                "avg_daily": avg_data["avg_daily"]
-            }
-    
-    if not prev and next_:
-        days_diff = (avg_data["last_date"] - target_date).days
-        if days_diff >= 0:
-            extrapolated = avg_data["last_value"] - (days_diff * avg_data["avg_daily"])
-            return {
-                "value": round(max(0, extrapolated), 2),
-                "method": "extrapolate_back_avg",
-                "prev_date": None,
-                "next_date": avg_data["last_date"].isoformat(),
-                "is_extrapolated": True,
-                "avg_daily": avg_data["avg_daily"]
-            }
+            return {"value": round(avg_data["last_value"] + (days_diff * avg_data["avg_daily"]), 2), "method": "extrapolate_forward_avg", "prev_date": avg_data["last_date"].isoformat(), "next_date": None, "is_extrapolated": True, "avg_daily": avg_data["avg_daily"]}
     
     return None
 
@@ -375,6 +316,109 @@ def delete_all_user_data(user_id: int) -> int:
     cursor.execute("DELETE FROM current_readings WHERE user_id = ?", (str(user_id),))
     cursor.execute("DELETE FROM tariff_history WHERE user_id = ?", (str(user_id),))
     cursor.execute("DELETE FROM user_tariffs WHERE user_id = ?", (str(user_id),))
+    cursor.execute("DELETE FROM user_profile WHERE user_id = ?", (str(user_id),))
+    cursor.execute("DELETE FROM fixed_services WHERE user_id = ?", (str(user_id),))
+    conn.commit()
+    conn.close()
+    return count
+
+# 🔥 ФУНКЦИИ ДЛЯ ПРОФИЛЯ
+def get_user_profile(user_id: int) -> dict:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT area, residents FROM user_profile WHERE user_id = ?", (str(user_id),))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"area": row["area"] or 0.0, "residents": row["residents"] or 0}
+    return {"area": 0.0, "residents": 0}
+
+def update_user_profile(user_id: int, area: float = None, residents: int = None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    current = get_user_profile(user_id)
+    if area is None: area = current["area"]
+    if residents is None: residents = current["residents"]
+    cursor.execute("INSERT OR REPLACE INTO user_profile (user_id, area, residents, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)", (str(user_id), area, residents))
+    conn.commit()
+    conn.close()
+
+# 🔥 ФУНКЦИИ ДЛЯ СТАЦИОНАРНЫХ ПЛАТЕЖЕЙ
+def get_fixed_services(user_id: int, year: int, month: int) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    first_day = f"{year:04d}-{month:02d}-01"
+    last_day = f"{year+1 if month==12 else year:04d}-{1 if month==12 else month+1:02d}-01"
+    cursor.execute("""
+        SELECT id, service_name, amount, unit
+        FROM fixed_services
+        WHERE user_id = ? AND effective_date >= ? AND effective_date < ?
+        ORDER BY service_name
+    """, (str(user_id), first_day, last_day))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def delete_fixed_service_by_id(user_id: int, service_id: int):
+    """Удаляет услугу по уникальному ID"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM fixed_services WHERE user_id = ? AND id = ?", (str(user_id), service_id))
+    conn.commit()
+    conn.close()
+
+def add_fixed_service(user_id: int, service_name: str, amount: float, unit: str = "руб", effective_date: date = None):
+    if effective_date is None: effective_date = date.today()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO fixed_services (user_id, service_name, amount, unit, effective_date) VALUES (?, ?, ?, ?, ?)", (str(user_id), service_name, amount, unit, effective_date.isoformat()))
+    conn.commit()
+    conn.close()
+
+def remove_fixed_service(user_id: int, service_id: int):
+    """Удаляет услугу по ID (безопасно)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        DELETE FROM fixed_services
+        WHERE user_id = ? AND id = ?
+    """, (str(user_id), service_id))
+    conn.commit()
+    conn.close()
+
+def get_fixed_services_total(user_id: int, year: int, month: int) -> float:
+    services = get_fixed_services(user_id, year, month)
+    return sum(s["amount"] for s in services)
+
+# 🔥 НОВАЯ ФУНКЦИЯ: КОПИРОВАНИЕ
+def copy_fixed_services(user_id: int, from_year: int, from_month: int, to_year: int, to_month: int) -> int:
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Даты источника
+    first_from = f"{from_year:04d}-{from_month:02d}-01"
+    last_from = f"{from_year + 1 if from_month == 12 else from_year:04d}-{1 if from_month == 12 else from_month + 1:02d}-01"
+    
+    # Даты назначения
+    first_to = f"{to_year:04d}-{to_month:02d}-01"
+    
+    # Получаем данные из источника
+    cursor.execute("SELECT service_name, amount, unit FROM fixed_services WHERE user_id = ? AND effective_date >= ? AND effective_date < ?", (str(user_id), first_from, last_from))
+    services = cursor.fetchall()
+    
+    if not services:
+        conn.close()
+        return 0
+    
+    # Вставляем в назначение
+    count = 0
+    for s in services:
+        cursor.execute("""
+            INSERT OR REPLACE INTO fixed_services (user_id, service_name, amount, unit, effective_date)
+            VALUES (?, ?, ?, ?, ?)
+        """, (str(user_id), s["service_name"], s["amount"], s["unit"], first_to))
+        count += 1
+    
     conn.commit()
     conn.close()
     return count
