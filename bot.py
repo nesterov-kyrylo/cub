@@ -476,12 +476,12 @@ async def handle_fixed_callbacks(callback_query: types.CallbackQuery):
         service_id = int(action.split("_")[2])
         
         # Получаем информацию о платеже
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT service_name, amount FROM fixed_services WHERE id = ? AND user_id = ?", 
-                       (service_id, str(user_id)))
-        service = cursor.fetchone()
-        conn.close()
+        from database import get_db_manager
+        with get_db_manager().get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT service_name, amount FROM fixed_services WHERE id = ? AND user_id = ?", 
+                           (service_id, str(user_id)))
+            service = cursor.fetchone()
         
         if not service:
             await callback_query.answer("❌ Платеж не найден!")
@@ -656,15 +656,15 @@ async def handle_message(message: Message):
                 service_name = user_temp_data[user_id]["name"]
                 
                 # Обновляем платеж в БД
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute("""
-                    UPDATE fixed_services 
-                    SET amount = ? 
-                    WHERE id = ? AND user_id = ?
-                """, (new_amount, service_id, str(user_id)))
-                conn.commit()
-                conn.close()
+                from database import get_db_manager
+                with get_db_manager().get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        UPDATE fixed_services 
+                        SET amount = ? 
+                        WHERE id = ? AND user_id = ?
+                    """, (new_amount, service_id, str(user_id)))
+                    conn.commit()
                 
                 # Очищаем данные
                 del user_states[user_id]
