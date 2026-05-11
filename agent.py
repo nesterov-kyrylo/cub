@@ -1,6 +1,8 @@
 import ollama
 import json
 import re
+import hashlib
+from functools import lru_cache
 from datetime import datetime, date
 from database import (
     get_current_readings, update_current_readings,
@@ -12,24 +14,11 @@ from database import (
 MODEL = "qwen2.5-coder:3b"
 
 SYSTEM_PROMPT = """
-Ты — агент для извлечения показаний счётчиков из текста.
+Извлеки показания счётчиков из текста.
 
-МАППИНГ СЛОВ:
-- "вода", "water", "холодная вода", "хв" → ключ "water"
-- "газ", "gas", "газомер" → ключ "gas"  
-- "свет", "electricity", "электроэнергия", "электричество", "электросчётчик" → ключ "electricity"
-
-ПРАВИЛА:
-1. Из входной строки извлеки ТОЛЬКО упомянутые счётчики
-2. Верни СТРОГО валидный JSON ТОЛЬКО с упомянутыми ключами
-3. Формат: {"water": число, "gas": число, "electricity": число}
-4. Если упомянут только один счётчик — верни JSON с одним ключом
-5. НЕ добавляй ключи, которые не упомянуты в тексте
-6. Никаких пояснений, только JSON.
-
-ПРИМЕРЫ:
-Ввод: "вода 100" → Вывод: {"water": 100}
-Ввод: "свет 130" → Вывод: {"electricity": 130}
+Ключи: water (вода), gas (газ), electricity (свет)
+Верни JSON только с упомянутыми ключами.
+Пример: "вода 100" → {"water": 100}
 """
 
 def parse_date_from_input(user_input: str) -> tuple:
@@ -50,37 +39,72 @@ def parse_date_from_input(user_input: str) -> tuple:
     
     return user_input.strip(), date.today()
 
+def _get_input_hash(user_input: str) -> str:
+    """Генерирует хеш входной строки для кеширования"""
+    # Нормализуем вход: нижний регистр, убираем лишние пробелы
+    normalized = re.sub(r'\s+', ' ', user_input.lower().strip())
+    return hashlib.md5(normalized.encode()).hexdigest()
+
+@lru_cache(maxsize=100)
 def get_readings_from_llm(user_input: str) -> dict:
-    response = ollama.chat(
-        model=MODEL,
-        messages=[
-            {'role': 'system', 'content': SYSTEM_PROMPT},
-            {'role': 'user', 'content': user_input}
-        ],
-        options={"temperature": 0.0}
-    )
-    raw = response['message']['content'].strip()
-    if raw.startswith('```'):
-        raw = raw.lstrip('`')
-        if raw.lower().startswith('json'): raw = raw[4:]
-        raw = raw.strip()
-    if raw.endswith('```'):
-        raw = raw.rstrip('`').strip()
+    """Парсинг показаний с кешированием"""
+    input_hash = _get_input_hash(user_input)
     
-    print(f"🔍 LLM ответ на '{user_input}': {raw}")
-    parsed = json.loads(raw)
+    try:
+        response = ollama.chat(
+            model=MODEL,
+            messages=[
+                {'role': 'system', 'content': SYSTEM_PROMPT},
+                {'role': 'user', 'content': user_input}
+            ],
+            options={"temperature": 0.0}
+        )
+        raw = response['message']['content'].strip()
+        
+        # Очистка ответа
+        if raw.startswith('```'):
+            raw = raw.lstrip('`')
+            if raw.lower().startswith('json'): raw = raw[4:]
+            raw = raw.strip()
+        if raw.endswith('```'):
+            raw = raw.rstrip('`').strip()
+        
+        print(f"🔍 LLM ответ на '{user_input}': {raw}")
+        parsed = json.loads(raw)
+        
+        # Валидация ключей
+        valid_keys = {'water', 'gas', 'electricity'}
+        for key in list(parsed.keys()):
+            if key not in valid_keys:
+                del parsed[key]
+        
+        return parsed
+        
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        print(f"❌ Ошибка парсинга LLM ответа: {e}")
+        return {}
+
+def validate_input(user_input: str) -> str:
+    """Валидация и нормализация входных данных"""
+    if not user_input or not user_input.strip():
+        raise ValueError("❌ Пустой ввод. Пожалуйста, введите показания.")
     
-    valid_keys = {'water', 'gas', 'electricity'}
-    for key in list(parsed.keys()):
-        if key not in valid_keys:
-            del parsed[key]
+    # Проверка на минимальную длину
+    if len(user_input.strip()) < 3:
+        raise ValueError("❌ Слишком короткий ввод. Введите показания в формате 'вода 100'.")
     
-    return parsed
+    # Проверка на наличие цифр
+    if not re.search(r'\d+', user_input):
+        raise ValueError("❌ В вводе нет цифр. Пожалуйста, введите числовые показания.")
+    
+    return user_input.strip()
 
 def process_readings(user_input: str, user_id: int) -> str:
     """Основная логика: парсинг, валидация, очистка, расчёт"""
     
-    cleaned_input, reading_date = parse_date_from_input(user_input)
+    # Валидация входных данных
+    validated_input = validate_input(user_input)
+    cleaned_input, reading_date = parse_date_from_input(validated_input)
     
     # 🔥 АВТО-ОЧИСТКА: Если мы вносим ФАКТ, удаляем расчеты ПОСЛЕ prev_date
     prev_fact = get_previous_reading(user_id, reading_date)
@@ -102,7 +126,7 @@ def process_readings(user_input: str, user_id: int) -> str:
     new_data = get_readings_from_llm(cleaned_input)
     
     if not new_data:
-        raise ValueError("❌ Не удалось извлечь показания.")
+        raise ValueError("❌ Не удалось извлечь показания. Попробуйте другой формат, например: 'вода 100, газ 50'.")
     
     report, total_cost = [], 0.0
     updated_readings = history.copy()
@@ -119,10 +143,16 @@ def process_readings(user_input: str, user_id: int) -> str:
                 continue
         
         if new_val < old_val:
-            raise ValueError(f"{label} ({new_val}) меньше предыдущего ({old_val}).")
+            raise ValueError(f"{label} ({new_val}) меньше предыдущего ({old_val}). Показания могут только увеличиваться.")
         if next_reading and next_reading.get(key) is not None:
             if new_val > next_reading[key]:
-                raise ValueError(f"{label} ({new_val}) больше следующего ({next_reading[key]}).")
+                raise ValueError(f"{label} ({new_val}) больше следующего ({next_reading[key]}). Проверьте правильность ввода.")
+        
+        # Дополнительная валидация значений
+        if new_val < 0:
+            raise ValueError(f"{label} не может быть отрицательным ({new_val}).")
+        if new_val > 1000000:  # Защита от опечаток
+            raise ValueError(f"{label} слишком большое значение ({new_val}). Проверьте правильность ввода.")
         
         delta = new_val - old_val
         cost = delta * tariffs.get(key, 0)
